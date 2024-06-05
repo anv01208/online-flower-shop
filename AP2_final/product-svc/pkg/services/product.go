@@ -1,0 +1,130 @@
+package services
+
+import (
+	"context"
+	"net/http"
+
+	"github.com/anv01208/online-flower-shop/product-svc/pkg/db"
+	"github.com/anv01208/online-flower-shop/product-svc/pkg/models"
+	pb "github.com/anv01208/online-flower-shop/product-svc/pkg/pb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+type Server struct {
+	pb.UnimplementedProductServiceServer
+	H db.Handler
+}
+
+func (s *Server) CreateProduct(ctx context.Context, req *pb.CreateProductRequest) (*pb.CreateProductResponse, error) {
+	var product models.Product
+
+	product.Name = req.GetName()
+	product.Stock = req.GetStock()
+	product.Price = req.GetPrice()
+	product.Category = req.GetCategory()
+
+	if result := s.H.DB.Create(&product); result.Error != nil {
+		return &pb.CreateProductResponse{
+			Status: http.StatusConflict,
+			Error:  result.Error.Error(),
+		}, nil
+	}
+
+	return &pb.CreateProductResponse{
+		Status: http.StatusCreated,
+		Id:     product.Id,
+	}, nil
+}
+
+func (s *Server) FindOne(ctx context.Context, req *pb.FindOneProductRequest) (*pb.FindOneProductResponse, error) {
+	var product models.Product
+
+	if result := s.H.DB.First(&product, req.Id); result.Error != nil {
+		return &pb.FindOneProductResponse{
+			Status: http.StatusNotFound,
+			Error:  result.Error.Error(),
+		}, nil
+	}
+
+	data := &pb.ProductData{
+		Id:       product.Id,
+		Name:     product.Name,
+		Stock:    product.Stock,
+		Price:    product.Price,
+		Category: product.Category,
+	}
+
+	return &pb.FindOneProductResponse{
+		Status: http.StatusOK,
+		Data:   data,
+	}, nil
+}
+
+func (s *Server) FindAll(req *pb.Empty, stream pb.ProductService_FindAllServer) error {
+	var products []models.Product
+
+	if result := s.H.DB.Find(&products); result.Error != nil {
+		return status.Errorf(codes.Internal, "Failed to retrieve products: %v", result.Error)
+	}
+
+	response := &pb.FindAllProductsResponse{}
+
+	// Iterate over the products and send each as a response
+	for _, product := range products {
+		productData := &pb.ProductData{
+			Id:       product.Id,
+			Name:     product.Name,
+			Stock:    product.Stock,
+			Price:    product.Price,
+			Category: product.Category,
+		}
+		response.Data = append(response.Data, productData)
+	}
+
+	if err := stream.Send(response); err != nil {
+		return status.Errorf(codes.Internal, "Failed to send response: %v", err)
+	}
+
+	return nil
+}
+
+func (s *Server) DecreaseStock(ctx context.Context, req *pb.DecreaseStockRequest) (*pb.DecreaseStockResponse, error) {
+	var product models.Product
+
+	if result := s.H.DB.First(&product, req.Id); result.Error != nil {
+		return &pb.DecreaseStockResponse{
+			Status: http.StatusNotFound,
+			Error:  result.Error.Error(),
+		}, nil
+	}
+
+	if product.Stock <= 0 {
+		return &pb.DecreaseStockResponse{
+			Status: http.StatusConflict,
+			Error:  "Stock too low",
+		}, nil
+	}
+
+	var log models.StockDecreaseLog
+
+	if result := s.H.DB.Where(&models.StockDecreaseLog{OrderId: req.OrderId}).First(&log); result.Error == nil {
+		return &pb.DecreaseStockResponse{
+			Status: http.StatusConflict,
+			Error:  "Stock already decreased",
+		}, nil
+	}
+
+	product.Stock = product.Stock - 1
+
+	s.H.DB.Save(&product)
+
+	log.OrderId = req.OrderId
+	log.ProductRefer = product.Id
+
+	s.H.DB.Create(&log)
+
+	return &pb.DecreaseStockResponse{
+		Status: http.StatusOK,
+	}, nil
+}
